@@ -1,72 +1,91 @@
-name: sic-censored
-channels:
-  - conda-forge
-  - defaults
-dependencies:
-  - appnope=0.1.0=py39hde42818_1002
-  - backcall=0.2.0=pyh9f0ad1d_0
-  - backports=1.0=py_2
-  - backports.functools_lru_cache=1.6.1=py_0
-  - ca-certificates=2020.6.20=hecda079_0
-  - certifi=2020.6.20=py39h2c36a5b_2
-  - decorator=4.4.2=py_0
-  - ipython=7.19.0=py39h71a6800_0
-  - ipython_genutils=0.2.0=py_1
-  - jedi=0.17.2=py39hde42818_1
-  - libcxx=11.0.0=h439d374_0
-  - libffi=3.2.1=hb1e8313_1007
-  - ncurses=6.2=h2e338ed_3
-  - openssl=1.1.1h=haf1e3a3_0
-  - parso=0.7.1=pyh9f0ad1d_0
-  - pexpect=4.8.0=pyh9f0ad1d_2
-  - pickleshare=0.7.5=py_1003
-  - pip=20.2.4=py_0
-  - prompt-toolkit=3.0.8=py_0
-  - ptyprocess=0.6.0=py_1001
-  - pygments=2.7.2=py_0
-  - python=3.9.0=ha017127_4_cpython
-  - python_abi=3.9=1_cp39
-  - readline=8.0=h0678c8f_2
-  - setuptools=49.6.0=py39h2c36a5b_2
-  - sqlite=3.33.0=h960bd1c_1
-  - tk=8.6.10=hb0a8c7a_1
-  - traitlets=5.0.5=py_0
-  - tzdata=2020d=h516909a_0
-  - wcwidth=0.2.5=pyh9f0ad1d_2
-  - wheel=0.35.1=pyh9f0ad1d_0
-  - xz=5.2.5=haf1e3a3_1
-  - zlib=1.2.11=h7795811_1010
-  - pip:
-    - beautifulsoup4==4.9.3
-    - blis==0.4.1
-    - catalogue==1.0.0
-    - chardet==3.0.4
-    - click==7.1.2
-    - cymem==2.0.4
-    - en-core-web-sm==2.3.1
-    - flask==1.1.2
-    - gunicorn==20.0.4
-    - idna==2.10
-    - itsdangerous==1.1.0
-    - jinja2==2.11.2
-    - markupsafe==1.1.1
-    - murmurhash==1.0.4
-    - musicbrainzngs==0.7.1
-    - numpy==1.19.4
-    - plac==1.1.3
-    - preshed==3.0.4
-    - pycountry==20.7.3
-    - python-decouple==3.3
-    - requests==2.24.0
-    - six==1.15.0
-    - soupsieve==2.0.1
-    - spacy==2.3.2
-    - spotipy==2.16.1
-    - srsly==1.0.3
-    - thinc==7.4.1
-    - tqdm==4.51.0
-    - urllib3==1.25.11
-    - wasabi==0.8.0
-    - werkzeug==1.0.1
-    - whitenoise==5.2.0
-prefix: /Users/syl20/anaconda3/envs/sic-censored
+#!/usr/bin/env python
+# 11/05/20 sylvain // telegram: @slegroux
+
+import requests
+from bs4 import BeautifulSoup
+import spacy
+import musicbrainzngs
+import pycountry
+import spotipy
+import os
+import argparse
+from spotipy.oauth2 import SpotifyClientCredentials, SpotifyOAuth
+import spotipy.util as util
+
+ID = os.environ.get('SPOTIFY_ID')
+SECRET = os.environ.get('SPOTIFY_SECRET')
+REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI')
+
+# sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=ID, client_secret=SECRET))
+scope = 'playlist-modify-public'
+sp = spotipy.Spotify(auth_manager=SpotifyOAuth(client_id=ID,
+                                               client_secret=SECRET,
+                                               redirect_uri=REDIRECT_URI,
+                                               scope=scope))
+
+musicbrainzngs.set_useragent("sic-censored", "0.1", "http://example.com")
+nlp = spacy.load("en_core_web_sm")
+
+
+def get_args():
+    parser = argparse.ArgumentParser(description='test freemuse=>musicbrainz=>spotify')
+    # TODO: just pass country and map region
+    parser.add_argument('-r', '--region', required=True, default='europe',
+                        help='europe/africa/asia/north-south-america/middle-east-north-africa')
+    parser.add_argument('-c', '--country', required=True, default='spain',
+                        help='country')
+    return parser.parse_args()
+
+
+def get_artists_from_freemuse(region, country):
+    artists = set()
+    # TODO: parse through all pages not just first one
+    url = "https://freemuse.org/regions" + "/" + region + "/" + country
+    page = requests.get(url)
+    soup = BeautifulSoup(page.content, 'html.parser')
+    items = soup.find_all(class_="item-list")
+    for item in items:
+        entry = item.find(class_="entry")
+        article = entry.find('p').getText()
+        doc = nlp(article)
+        # keep only persons 
+        # TODO: sometimes actually ORG is relevant too
+        entities = [x.text for x in doc.ents if (x.label_ == 'PERSON')]
+        if entities:
+            for entity in entities:
+                # cross check person with musicbrainz so we make sure the artist exists in the specified country
+                # TODO: not very robust. find some way to double check
+
+                artist_in_musicbrainz = musicbrainzngs.search_artists(artist=entity, country=pycountry.countries.get(name=country).alpha_2)['artist-list'][0]['name']
+                artists.add(artist_in_musicbrainz)
+    return(artists)
+
+
+def top_tracks_on_spotify(artist):
+    uri = sp.search(artist)['tracks']['items'][0]['artists'][0]['uri']
+    response = sp.artist_top_tracks(uri)
+    return(response['tracks'])
+
+
+def create_spotify_playlist(tids, name='sic-censored'):
+    user_id = sp.me()['id']
+    pl = sp.user_playlist_create(user_id, name)
+    sp.playlist_add_items(pl['id'], tids)
+    
+
+if __name__ == "__main__":
+
+    args = get_args()
+    region = args.region
+    country = args.country
+    artists = get_artists_from_freemuse(region, country)
+
+    tids = []
+    for artist in artists:
+        tops = top_tracks_on_spotify(artist)
+        for track in tops:
+            print(artist, track['name'])
+            tids.append(track['id'])
+
+    create_spotify_playlist(tids,'sic-censored' +'_' + region + '_' + country)
+
